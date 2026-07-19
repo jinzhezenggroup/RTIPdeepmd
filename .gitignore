@@ -1,5 +1,49 @@
+# Python bytecode / packaging
 __pycache__/
 **/__pycache__/
 *.py[cod]
 *.pyc.*
-*$py.class
+*.class
+*.egg-info/
+build/
+dist/
+*.egg
+.venv/
+venv/
+env/
+
+# Training / inference artifacts (large binaries and checkpoints)
+*.npz
+*.pkl
+*.pth
+*.pt
+*.pb
+deepmd_pretrained/*.pt
+deepmd_pretrained/*.pth
+deepmd_pretrained/*.pb
+
+# Slurm job logs
+slurm-*.out
+slurm-*.err
+
+# Generated supercells (output from src.lib, regenerable)
+supercell-*.xyz
+
+# Per-run numeric output directories at repo root
+# Covers 0/, 143/, 163/, 174/, etc.
+/[0-9]*/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenCode / local workspace config
+.opencode/
+.windsurf/
