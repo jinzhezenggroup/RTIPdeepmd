@@ -53,11 +53,63 @@ PY
 fi
 
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-1}}"
+export DP_INTRA_OP_PARALLELISM_THREADS="${DP_INTRA_OP_PARALLELISM_THREADS:-${OMP_NUM_THREADS}}"
+export DP_INTER_OP_PARALLELISM_THREADS="${DP_INTER_OP_PARALLELISM_THREADS:-1}"
+
+OUTPUT_INDEX="${OUTPUT_INDEX:-${SLURM_JOB_ID:-0}}"
+XYZ_DIR="${XYZ_DIR:-${WORKDIR}}"
+SUPERCELL_OUT="${SUPERCELL_OUT:-supercell-${OUTPUT_INDEX}.xyz}"
+
+# Conservative MD defaults for stable DeepMD RTIP startup.
+MD_PRINT_STEP="${MD_PRINT_STEP:-10}"
+MD_DT="${MD_DT:-0.05}"
+MD_TAU="${MD_TAU:-200}"
+MD_TEMP_BATH="${MD_TEMP_BATH:-800}"
+MD_TEMP_START_SCALE="${MD_TEMP_START_SCALE:-0.02}"
+MD_TEMP_RAMP_STEPS="${MD_TEMP_RAMP_STEPS:-1000}"
+MD_THERMOSTAT_LAM_MIN="${MD_THERMOSTAT_LAM_MIN:-0.995}"
+MD_THERMOSTAT_LAM_MAX="${MD_THERMOSTAT_LAM_MAX:-1.005}"
+
+declare -a MD_OVERRIDES=()
+if [[ -n "${MD_MAX_STEP:-}" ]]; then
+	MD_OVERRIDES+=(--md-max-step "${MD_MAX_STEP}")
+fi
+if [[ -n "${MD_PRINT_STEP:-}" ]]; then
+	MD_OVERRIDES+=(--md-print-step "${MD_PRINT_STEP}")
+fi
+if [[ -n "${MD_DT:-}" ]]; then
+	MD_OVERRIDES+=(--md-dt "${MD_DT}")
+fi
+if [[ -n "${MD_TAU:-}" ]]; then
+	MD_OVERRIDES+=(--md-tau "${MD_TAU}")
+fi
+if [[ -n "${MD_TEMP_BATH:-}" ]]; then
+	MD_OVERRIDES+=(--md-temp-bath "${MD_TEMP_BATH}")
+fi
+if [[ -n "${MD_TEMP_START_SCALE:-}" ]]; then
+	MD_OVERRIDES+=(--md-temp-start-scale "${MD_TEMP_START_SCALE}")
+fi
+if [[ -n "${MD_TEMP_RAMP_STEPS:-}" ]]; then
+	MD_OVERRIDES+=(--md-temp-ramp-steps "${MD_TEMP_RAMP_STEPS}")
+fi
+if [[ -n "${MD_THERMOSTAT_LAM_MIN:-}" ]]; then
+	MD_OVERRIDES+=(--md-thermostat-lam-min "${MD_THERMOSTAT_LAM_MIN}")
+fi
+if [[ -n "${MD_THERMOSTAT_LAM_MAX:-}" ]]; then
+	MD_OVERRIDES+=(--md-thermostat-lam-max "${MD_THERMOSTAT_LAM_MAX}")
+fi
+if [[ "${RTIP_DRY_RUN:-0}" == "1" || "${DRY_RUN:-0}" == "1" ]]; then
+	MD_OVERRIDES+=(--dry-run)
+fi
+
+echo "Running RTIP-DeepMD with model=${MODEL_ARG}, output-index=${OUTPUT_INDEX}"
 
 
 python3 -m src.lib \
 	--no-mpi \
-	--xyz-dir "${WORKDIR}" \
+	--xyz-dir "${XYZ_DIR}" \
 	--model "${MODEL_ARG}" \
-	--output-index "${SLURM_JOB_ID:-0}" \
-	--supercell-out "supercell-${SLURM_JOB_ID:-0}.xyz"
+	--output-index "${OUTPUT_INDEX}" \
+	--supercell-out "${SUPERCELL_OUT}" \
+	"${MD_OVERRIDES[@]}"

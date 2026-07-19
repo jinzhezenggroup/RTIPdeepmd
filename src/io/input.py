@@ -28,6 +28,10 @@ class MdPara:
     dt: float = 0.5
     tau: float = 10.0
     temp_bath: float = 1500.0
+    temp_start_scale: float = 1.0
+    temp_ramp_steps: int = 0
+    thermostat_lam_min: float = 0.0
+    thermostat_lam_max: float = 0.0
     decreasing_multiple: float = 2.0
     decreasing_bound: float = 0.5
     ignored_pair: list[tuple[Element, Element]] = field(

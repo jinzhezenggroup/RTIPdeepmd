@@ -107,6 +107,15 @@ def _build_parser() -> argparse.ArgumentParser:
 	parser.add_argument("--strict-xyz", action="store_true", help="Fail if any recipe XYZ file is missing.")
 	parser.add_argument("--dry-run", action="store_true", help="Build supercell and outputs only; skip DeepMD evaluation and MD.")
 	parser.add_argument("--no-mpi", action="store_true", help="Force single-process mode even if mpi4py is available.")
+	parser.add_argument("--md-max-step", type=int, default=None, help="Override MdPara.max_step.")
+	parser.add_argument("--md-print-step", type=int, default=None, help="Override MdPara.print_step.")
+	parser.add_argument("--md-dt", type=float, default=None, help="Override MdPara.dt.")
+	parser.add_argument("--md-tau", type=float, default=None, help="Override MdPara.tau.")
+	parser.add_argument("--md-temp-bath", type=float, default=None, help="Override MdPara.temp_bath.")
+	parser.add_argument("--md-temp-start-scale", type=float, default=None, help="Override MdPara.temp_start_scale.")
+	parser.add_argument("--md-temp-ramp-steps", type=int, default=None, help="Override MdPara.temp_ramp_steps.")
+	parser.add_argument("--md-thermostat-lam-min", type=float, default=None, help="Override MdPara.thermostat_lam_min.")
+	parser.add_argument("--md-thermostat-lam-max", type=float, default=None, help="Override MdPara.thermostat_lam_max.")
 	return parser
 
 
@@ -197,6 +206,74 @@ def _broadcast_state(s: System, comm: t.Any) -> System:
 	return s
 
 
+def _apply_md_overrides(args: argparse.Namespace, para: Para, rank: int) -> None:
+	applied: list[str] = []
+
+	if args.md_max_step is not None:
+		if args.md_max_step <= 0:
+			raise ValueError("--md-max-step must be positive.")
+		para.md_para.max_step = args.md_max_step
+		applied.append(f"max_step={args.md_max_step}")
+
+	if args.md_print_step is not None:
+		if args.md_print_step <= 0:
+			raise ValueError("--md-print-step must be positive.")
+		para.md_para.print_step = args.md_print_step
+		applied.append(f"print_step={args.md_print_step}")
+
+	if args.md_dt is not None:
+		if args.md_dt <= 0.0:
+			raise ValueError("--md-dt must be positive.")
+		para.md_para.dt = args.md_dt
+		applied.append(f"dt={args.md_dt}")
+
+	if args.md_tau is not None:
+		if args.md_tau <= 0.0:
+			raise ValueError("--md-tau must be positive.")
+		para.md_para.tau = args.md_tau
+		applied.append(f"tau={args.md_tau}")
+
+	if args.md_temp_bath is not None:
+		if args.md_temp_bath <= 0.0:
+			raise ValueError("--md-temp-bath must be positive.")
+		para.md_para.temp_bath = args.md_temp_bath
+		applied.append(f"temp_bath={args.md_temp_bath}")
+
+	if args.md_temp_start_scale is not None:
+		if args.md_temp_start_scale < 0.0:
+			raise ValueError("--md-temp-start-scale must be non-negative.")
+		para.md_para.temp_start_scale = args.md_temp_start_scale
+		applied.append(f"temp_start_scale={args.md_temp_start_scale}")
+
+	if args.md_temp_ramp_steps is not None:
+		if args.md_temp_ramp_steps < 0:
+			raise ValueError("--md-temp-ramp-steps must be non-negative.")
+		para.md_para.temp_ramp_steps = args.md_temp_ramp_steps
+		applied.append(f"temp_ramp_steps={args.md_temp_ramp_steps}")
+
+	if args.md_thermostat_lam_min is not None:
+		if args.md_thermostat_lam_min <= 0.0:
+			raise ValueError("--md-thermostat-lam-min must be positive.")
+		para.md_para.thermostat_lam_min = args.md_thermostat_lam_min
+		applied.append(f"thermostat_lam_min={args.md_thermostat_lam_min}")
+
+	if args.md_thermostat_lam_max is not None:
+		if args.md_thermostat_lam_max <= 0.0:
+			raise ValueError("--md-thermostat-lam-max must be positive.")
+		para.md_para.thermostat_lam_max = args.md_thermostat_lam_max
+		applied.append(f"thermostat_lam_max={args.md_thermostat_lam_max}")
+
+	if (
+		(args.md_thermostat_lam_min is not None)
+		and (args.md_thermostat_lam_max is not None)
+		and (args.md_thermostat_lam_min > args.md_thermostat_lam_max)
+	):
+		raise ValueError("--md-thermostat-lam-min cannot be larger than --md-thermostat-lam-max.")
+
+	if rank == ROOT_RANK and applied:
+		print(f"Applied MD overrides: {', '.join(applied)}")
+
+
 def _run(argv: list[str] | None = None) -> int:
 	args = _build_parser().parse_args(argv)
 
@@ -205,6 +282,7 @@ def _run(argv: list[str] | None = None) -> int:
 	rank = _comm_rank(comm)
 
 	para = Para.new()
+	_apply_md_overrides(args, para, rank)
 	output_path = output.create_output_path(comm, args.output_index)
 
 	s, missing, auto_adjusted_mul = _load_initial_system(

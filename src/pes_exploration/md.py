@@ -135,6 +135,12 @@ def _nvt_loop(
 	dt = para.md_para.dt
 	max_step = para.md_para.max_step
 	print_step = para.md_para.print_step
+	tau = para.md_para.tau
+	temp_bath = para.md_para.temp_bath
+	temp_start_scale = para.md_para.temp_start_scale
+	temp_ramp_steps = para.md_para.temp_ramp_steps
+	thermostat_lam_min = para.md_para.thermostat_lam_min
+	thermostat_lam_max = para.md_para.thermostat_lam_max
 
 	masses = _atom_mass_array(s)
 	vel = np.zeros_like(np.asarray(s.coord), dtype=float) if initial_velocity is None else np.asarray(initial_velocity, dtype=float).copy()
@@ -154,7 +160,23 @@ def _nvt_loop(
 		temp = kin_pre * HARTREE_TO_JOULE / (BOLTZMANN * 3.0 * max(s.natom - 1, 1))
 		if temp < 1.0:
 			temp = 1.0
-		lam = np.sqrt(1.0 + (dt / para.md_para.tau) * (para.md_para.temp_bath / temp - 1.0))
+
+		target_temp = temp_bath
+		if temp_ramp_steps > 0:
+			ramp = min(float(i), float(temp_ramp_steps)) / float(temp_ramp_steps)
+			start_temp = temp_bath * temp_start_scale
+			target_temp = start_temp + (temp_bath - start_temp) * ramp
+
+		if tau > 0.0:
+			lam_inner = 1.0 + (dt / tau) * (target_temp / temp - 1.0)
+			lam = 1.0 if lam_inner <= 0.0 else float(np.sqrt(lam_inner))
+		else:
+			lam = 1.0
+
+		if thermostat_lam_min > 0.0:
+			lam = max(lam, thermostat_lam_min)
+		if thermostat_lam_max > 0.0:
+			lam = min(lam, thermostat_lam_max)
 
 		pot_real, force_real = real_pes.get_energy_force(s)
 		s.pot = float(pot_real)
