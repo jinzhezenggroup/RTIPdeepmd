@@ -17,7 +17,7 @@ sbatch run.slurm --max-step 20000 --stop-temp 30000
 ```
 
 - `run.slurm` 会激活 `/group/software/deepmd-kit-3.1.1`（可用 `DEEPMD_ENV` 覆盖），
-  模型路径默认 `deepmd_pretrained/DPA-3.2-5M.pt`（可用 `MODEL_PATH` 覆盖，多 head 模型用 `MODEL_HEAD`）。
+  模型路径默认 `deepmd_pretrained/DPA-3.2-5M.pt`（可用 `MODEL_PATH` 覆盖）。
 - `sbatch run.slurm` 后面的参数原样传给 `python -m rtipdeepmd`。
 - 输出在 `runs/<jobid>/`。
 - 只想检查初始盒子：`python -m rtipdeepmd --dry-run --seed 1 --output-dir runs/test`。
@@ -37,6 +37,16 @@ sbatch run.slurm --max-step 20000 --stop-temp 30000
 | `--split-step` | `md_para.split_step` | 100 | 每 100 步重新切分分子（≤0 关闭） |
 | `--max-step` | `md_para.max_step` | 1e8 | 最大步数 |
 | `--print-step` | `md_para.print_step` | 1 | 轨迹帧间隔 |
+
+DeepMD 选项：
+
+- `--head`：多任务模型的 head，默认 `OMol25`（分子 DFT，ωB97M-V）。
+  DPA-3.2-5M 有 23 个 head；不指定时 deepmd 会用 "Default"，它对应 OMat24（无机材料，PBE），不适合这个分子体系。
+  对单 head 模型，这个参数会被忽略。
+- `--charge`、`--spin`：DPA-3.x 的 frame parameter，即总电荷和自旋多重度 2S+1。
+  默认电荷为 0，多重度取与电子数一致的最低值。默认体系中性时有 225 个电子，所以是双重态；
+  模型自带的默认值 `[0, 1]` 对它不成立。如果要把戊糖当作醇盐负离子，用 `--charge -1`（226 电子，单重态）。
+  Rust/CP2K 的 `B97-3C.inp` 写的是 Charge 0、Multiplicity 1，对这个 225 电子的体系同样不成立。
 
 其他选项：
 
@@ -91,6 +101,7 @@ sbatch run.slurm --max-step 20000 --stop-temp 30000
 | `judge_variation_of_bonding` | 阈值 1.0 与 1.6 用反了 | 断键 > 1.6，成键 < 1.0 |
 | `judge_adj_of_mol` | 任意近距离即判接触 | 只看原本不成键的分子间原子对；单个分子返回 True |
 | 周期性 | 盒子作为周期晶胞传给 DeepMD，但 RTI 距离用的是未回折坐标 | 非周期，与 CP2K 设置一致 |
+| DeepMD head | 默认 head，即 OMat24（材料），fparam [0, 1] | OMol25（分子），fparam 为 [电荷, 自洽的多重度] |
 | 浮点精度 | JAX 未开 x64 时会被截断成 float32 | NumPy float64 |
 
 另外删去了这条 DeepMD 工作流用不到的模块：自研 NN、CP2K 接口、pathway sampling / IDWM 等。
