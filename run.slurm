@@ -1,63 +1,36 @@
 #!/bin/bash
-#SBATCH -J jax-rtip
+#SBATCH -J rtip-deepmd
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -c 10
 #SBATCH --gres=gpu:1
 #SBATCH -o slurm-%j.out
 #SBATCH -e slurm-%j.err
+#
+# Usage:  sbatch run.slurm [extra options for `python -m rtipdeepmd`]
+#   e.g.  sbatch run.slurm --max-step 20000 --seed 1 --stop-temp 30000
+# Environment overrides: DEEPMD_ENV, MODEL_PATH, MODEL_HEAD, OUTPUT_DIR
 
 set -eo pipefail
+cd "${SLURM_SUBMIT_DIR:-.}"
 
-WORKDIR="${SLURM_SUBMIT_DIR:-/home/lhshen/JAXversion}"
+DEEPMD_ENV="${DEEPMD_ENV:-/group/software/deepmd-kit-3.1.1}"
+source "${DEEPMD_ENV}/bin/activate" "${DEEPMD_ENV}"
 
-
-cd "${WORKDIR}"
-source /group/software/deepmd-kit-3.1.1/bin/activate /group/software/deepmd-kit-3.1.1
-
-if ! command -v python3 >/dev/null 2>&1; then
-	echo "python3 not found in current environment"
+MODEL_PATH="${MODEL_PATH:-deepmd_pretrained/DPA-3.2-5M.pt}"
+if [[ ! -f "${MODEL_PATH}" ]]; then
+	echo "DeepMD model not found: ${MODEL_PATH} (set MODEL_PATH)" >&2
 	exit 1
 fi
 
-DEFAULT_MODEL="/home/lhshen/JAXversion/deepmd_pretrained/DPA-3.2-5M.pt"
-MODEL_ARG="${MODEL_PATH:-${DEEPMD_MODEL:-${DEFAULT_MODEL}}}"
-if [[ -z "${MODEL_ARG}" ]]; then
-	echo "DeepMD model is not set. Please export MODEL_PATH or DEEPMD_MODEL."
-	exit 1
-fi
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-${SLURM_CPUS_PER_TASK:-1}}"
+export DP_INTRA_OP_PARALLELISM_THREADS="${DP_INTRA_OP_PARALLELISM_THREADS:-${OMP_NUM_THREADS}}"
+export DP_INTER_OP_PARALLELISM_THREADS="${DP_INTER_OP_PARALLELISM_THREADS:-1}"
 
-if [[ -d "${MODEL_ARG}" ]]; then
-	echo "DeepMD model path is a directory, not a file: ${MODEL_ARG}"
-	exit 1
-fi
+OUTPUT_DIR="${OUTPUT_DIR:-runs/${SLURM_JOB_ID:-local}}"
 
-if [[ ! -f "${MODEL_ARG}" ]]; then
-	if [[ "${MODEL_ARG}" == *"/"* || "${MODEL_ARG}" == *.pb || "${MODEL_ARG}" == *.pth || "${MODEL_ARG}" == *.pt ]]; then
-		echo "DeepMD model file not found: ${MODEL_ARG}"
-		exit 1
-	fi
-
-	if command -v dp >/dev/null 2>&1; then
-		if ! dp -h 2>/dev/null | grep -q "pretrained"; then
-			DP_VERSION="$(python3 - <<'PY'
-import deepmd
-print(getattr(deepmd, "__version__", "unknown"))
-PY
-)"
-			echo "Current deepmd-kit (${DP_VERSION}) does not support pretrained model aliases: ${MODEL_ARG}"
-			echo "Please set MODEL_PATH to an existing .pb/.pth/.pt file."
-			exit 1
-		fi
-	fi
-fi
-
-export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
-
-
-python3 -m src.lib \
-	--no-mpi \
-	--xyz-dir "${WORKDIR}" \
-	--model "${MODEL_ARG}" \
-	--output-index "${SLURM_JOB_ID:-0}" \
-	--supercell-out "supercell-${SLURM_JOB_ID:-0}.xyz"
+python3 -m rtipdeepmd \
+	--model "${MODEL_PATH}" \
+	${MODEL_HEAD:+--head "${MODEL_HEAD}"} \
+	--output-dir "${OUTPUT_DIR}" \
+	"$@"
