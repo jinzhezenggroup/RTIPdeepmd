@@ -68,6 +68,9 @@ class DeepmdPES:
             self._cache = (key, atype, fparam)
         return self._cache[1], self._cache[2]
 
+    def get_energy(self, s: System) -> float:
+        return self.get_energy_force(s)[0]
+
     def get_energy_force(self, s: System) -> tuple[float, np.ndarray]:
         coord = (s.coord * BOHR_TO_ANGSTROM).reshape(1, -1)
         cell = None
