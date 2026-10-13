@@ -46,7 +46,9 @@ DEFAULT_XYZ_DIR = Path(__file__).resolve().parent.parent / "molecules"
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m rtipdeepmd", description="RTIP evolution MD with a DeepMD PES.")
     p.add_argument("--model", help="DeepMD model file (.pt/.pth/.pb). Required unless --dry-run.")
-    p.add_argument("--head", default=None, help="Model head for multi-task DeepMD models.")
+    p.add_argument("--head", default="OMol25", help="Head of a multi-task DeepMD model (default: OMol25, molecular DFT).")
+    p.add_argument("--charge", type=int, default=0, help="Total charge (frame parameter of DPA-3.x models).")
+    p.add_argument("--spin", type=int, default=None, help="Spin multiplicity 2S+1 (default: lowest consistent with the electron count).")
     p.add_argument("--output-dir", default="run", help="Directory for all outputs.")
     p.add_argument("--xyz-dir", type=Path, default=DEFAULT_XYZ_DIR, help="Directory with the recipe XYZ files.")
     p.add_argument("--init", type=Path, default=None, help="Start from this XYZ instead of building a box.")
@@ -101,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     run_info = {
         "model": args.model,
         "head": args.head,
+        "charge": args.charge,
+        "spin": args.spin,
         "pbc": args.pbc,
         "seed": seed,
         "init": None if args.init is None else str(args.init),
@@ -117,8 +121,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from .deepmd_pes import DeepmdPES
 
-    pes = DeepmdPES(args.model, head=args.head, pbc=args.pbc)
-    print(f"DeepMD model {args.model} (type_map: {' '.join(pes.type_map[:10])} ...)", flush=True)
+    pes = DeepmdPES.load(args.model, head=args.head, pbc=args.pbc, charge=args.charge, spin=args.spin)
+    _, fparam = pes.frame_inputs(s.atom_type)
+    fparam_text = "none" if fparam is None else f"charge {fparam[0]:g}, multiplicity {fparam[1]:g}"
+    print(f"DeepMD model {args.model}, head {args.head}, frame parameters: {fparam_text}", flush=True)
     evolution_nvt_md(EvolutionPot(initial_state=s, para=para, output_path=out), pes, stop_temp=args.stop_temp)
     print("Finished", flush=True)
     return 0
