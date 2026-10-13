@@ -71,3 +71,13 @@ def test_unknown_element():
     s = System(coord=np.zeros((1, 3)), atom_type=["Fe"])
     with pytest.raises(ValueError, match="Fe"):
         DeepmdPES(StubDeepPot()).get_energy_force(s)
+
+
+def test_ase_calculator_round_trips_units():
+    ase = pytest.importorskip("ase")
+    from rtipdeepmd.ase_calculator import DeepmdCalculator
+
+    atoms = ase.Atoms("CaOH", positions=[[0, 0, 0], [2.1, 0, 0], [3.06, 0, 0]])
+    atoms.calc = DeepmdCalculator(DeepmdPES(StubDeepPot()))
+    assert atoms.get_potential_energy() == pytest.approx(1.0)
+    np.testing.assert_allclose(atoms.get_forces(), 1.0)

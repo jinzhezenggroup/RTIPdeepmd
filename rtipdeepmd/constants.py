@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 
 PI = math.pi
+GOLDEN_RATIO1 = 0.618033988749895
+GOLDEN_RATIO2 = 1.618033988749895
 
 C_LIGHT = 299792458.0
 H_PLANCK = 6.62606896e-34

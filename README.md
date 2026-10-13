@@ -22,6 +22,25 @@ sbatch run.slurm --max-step 20000 --stop-temp 30000
 - 输出在 `runs/<jobid>/`。
 - 只想检查初始盒子：`python -m rtipdeepmd --dry-run --seed 1 --output-dir runs/test`。
 
+## 双分子反应探测（--method synthesis）
+
+对应 Rust `SynthesisPot` 的路径采样（`pathway_sampling.rs`、`optimization.rs`、`synthesis.rs`），
+是论文 SI 里"随机放置 2–4 个分子 + 吸引 RTIP"的反应性探测，适合 1-R + CO₂ 这类双分子反应。
+它基于优化，不跑 MD，也没有温度：
+
+1. 每个分子随机转动后，质心放在离原点 `--synthesis-dist`（默认 5 Bohr）处。
+2. 每一步沿"真实力 + RTIP 力"方向做线搜索。RTIP 高度为 a = −a0·step，中心和宽度的定义与演化 MD 相同。
+3. 真实能量从最高点回落超过 `--pot-drop`（0.02 Ha）且仍高于初始能量时，认为已越过能垒：撤掉 RTIP，
+   在真实势能面上弛豫到 f_real/√N < `--f-epsilon`（0.001 Ha/Bohr）为止。结果状态为 `product`。
+4. 能量比最低点高出 `--pot-climb`（0.185 Ha）或 RTIP 力超过 1000 时停止，状态分别为 `climb` 和 `bias_force`。
+
+```bash
+python -m rtipdeepmd --method synthesis --model deepmd_pretrained/DPA-3.2-5M.pt     --molecule examples/ic5c02384/reactions/1-tBu__CO2/1.xyz     --molecule examples/ic5c02384/reactions/1-tBu__CO2/2.xyz --seed 1 --output-dir runs/syn_s1
+```
+
+输出 `initial.xyz`、`rtip.pdb`、`rtip.out`（逐步的 rti_dist、pot_real、pot_rtip、f_real、f_rtip、a_min）、
+`final.xyz`，以及 `run.json`（其中 `result` 记录状态和能量）。
+
 ## 参数
 
 默认值等于 Rust `Para::new()`（`src/io/input.rs`），都可以用命令行覆盖：

@@ -100,3 +100,25 @@ def test_recipe_box_matches_rust_composition():
     assert np.all(s.coord >= 0.0) and np.all(s.coord <= edge)
     mols = split_into_mol(s.get_atomic_radii(), s.get_dist_mat(), 1.25)
     assert len(mols) == 13   # Ca, 2 OH, pentose, 3 CH2O, 6 H2O
+
+
+def test_cli_molecule_and_ignored_pairs(tmp_path):
+    from rtipdeepmd.cli import main, parse_ignored_pairs, parse_molecules
+    import json
+
+    assert parse_molecules(["a.xyz:3", "b.xyz", "c:d.xyz:2"]) == [("a.xyz", 3), ("b.xyz", 1), ("c:d.xyz", 2)]
+    assert parse_ignored_pairs("none") == []
+    assert parse_ignored_pairs("H-O, C-Ca") == [("H", "O"), ("C", "Ca")]
+    assert parse_ignored_pairs(None) is None
+    with pytest.raises(ValueError):
+        parse_ignored_pairs("HO")
+
+    out = tmp_path / "run"
+    h2o = str(DEFAULT_XYZ_DIR / "H2O.xyz")
+    ch2o = str(DEFAULT_XYZ_DIR / "CH2O.xyz")
+    main(["--dry-run", "--seed", "2", "--output-dir", str(out), "--molecule", f"{h2o}:2", "--molecule", ch2o,
+          "--ignored-pairs", "none"])
+    s = System.read_xyz(out / "supercell.xyz")
+    assert s.natom == 10
+    info = json.loads((out / "run.json").read_text())
+    assert info["para"]["ignored_pair"] == []
