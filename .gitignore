@@ -1,5 +1,16 @@
 __pycache__/
-**/__pycache__/
 *.py[cod]
-*.pyc.*
-*$py.class
+.pytest_cache/
+*.egg-info/
+
+# Run outputs
+runs/
+run/
+slurm-*.out
+slurm-*.err
+
+# DeepMD models are large; keep them outside git (see README)
+deepmd_pretrained/
+*.pt
+*.pth
+*.pb
