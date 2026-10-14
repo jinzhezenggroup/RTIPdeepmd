@@ -41,6 +41,24 @@ python -m rtipdeepmd --method synthesis --model deepmd_pretrained/DPA-3.2-5M.pt 
 输出 `initial.xyz`、`rtip.pdb`、`rtip.out`（逐步的 rti_dist、pot_real、pot_rtip、f_real、f_rtip、a_min）、
 `final.xyz`，以及 `run.json`（其中 `result` 记录状态和能量）。
 
+和 Rust 一样，参与 RTIP 的可以只是分子的一部分：`--fragment MOL:ATOMS`（如 `1:6,17,18`，分子编号和原子编号都从 1 开始）
+只让分子 MOL 的这几个原子参与 RTIP，其余原子只感受真实势能面。
+`--min-contact`（Å）会重新抽取随机转动，直到不同分子的原子间距都不小于这个值；默认 0，与 Rust 一致。
+
+## 已知产物的路径（--method attractive）
+
+对应 Rust `AttractivePot`：RTIP 中心固定在 `--final` 给出的终态（原子顺序必须与初态一致），高度 a = −a0·step，
+宽度取当前到终态的 RTI 距离。RTI 距离小于 1 Bohr（或 RTIP 力超过 1000）时撤掉 RTIP，再在真实势能面上弛豫。
+初态用 `--molecule`（随机放置，同 synthesis）或 `--init` 给出。
+
+```bash
+python -m rtipdeepmd --method attractive --model deepmd_pretrained/DPA-3.2-5M.pt \
+    --init reactant_complex.xyz --final product_ordered.xyz --output-dir runs/attr
+```
+
+路径最高点只是能垒的上界（有偏置）；`examples/ic5c02384/ts_barriers.py --from-path` 用 dimer 方法把它精修成 DeepMD 势能面上的过渡态。
+N₂ 与 CO₂ 偶联论文的完整复现流程见 `examples/ic5c02384/README.md`。
+
 ## 参数
 
 默认值等于 Rust `Para::new()`（`src/io/input.rs`），都可以用命令行覆盖：
@@ -123,8 +141,23 @@ DeepMD 选项：
 | DeepMD head | 默认 head，即 OMat24（材料），fparam [0, 1] | OMol25（分子），fparam 为 [电荷, 自洽的多重度] |
 | 浮点精度 | JAX 未开 x64 时会被截断成 float32 | NumPy float64 |
 
-另外删去了这条 DeepMD 工作流用不到的模块：自研 NN、CP2K 接口、pathway sampling / IDWM 等。
-完整的 pathway sampling 移植见 [jinzhezenggroup/RTIP](https://github.com/jinzhezenggroup/RTIP)。
+另外删去了这条 DeepMD 工作流用不到的模块：自研 NN、CP2K 接口、IDWM 等。pathway sampling 只移植了
+`SynthesisPot` 和 `AttractivePot`；完整版本见 [jinzhezenggroup/RTIP](https://github.com/jinzhezenggroup/RTIP)。
+
+## 精度验证（examples/accuracy）
+
+DFT 只用来验证 DeepMD，不参与采样。参考值用 PySCF 在 OMol25 的泛函 ωB97M-V/def2-TZVPD 上计算（`dft_reference.py`），
+用 `compare_dft.py` 对比：
+
+- 戊糖/甲醛盒子（54 原子，双重态，RTIP-MD 轨迹上的三帧）：绝对能量误差 4–20 meV/atom；力 RMSE 0.08–0.11 eV/Å，
+  在 12000 K 温度尖峰处的高能帧为 0.66 eV/Å（参考力 RMS 3.1 eV/Å，余弦 0.98）。相对能量：第 0→2000 步
+  DFT −51.8、DeepMD −54.1 kcal/mol；第 0→1000 步（高能帧）DFT +1336、DeepMD +1316 kcal/mol（相差 1.5%）。
+- NVE（`nve.py`，dt 0.5 fs）：能量漂移 −0.10 meV/atom/ps，涨落 0.16 meV/atom。
+- 1-R + CO₂ 等反应：见 `examples/ic5c02384/README.md`。反应能与 ωB97M-V 相差 1–3 kcal/mol，能垒系统性偏高 1–4 kcal/mol。
+
+演化 MD 照搬 Rust 的几处行为需要注意：σ 每步取当前 RTI 距离，靠近目标时 σ 很小，偏置力 ∝ |a|/σ 会突然变大，
+造成温度尖峰（上面那一帧），第 1 步的 Berendsen λ 也可达 8.7；Falling 阶段没有下限，`a_min` 可能变成正值。
+对 1-R + CO₂ 这类双分子反应，演化 MD 会跑飞，应使用 `--method attractive` 或 `synthesis`。
 
 ## 测试
 
@@ -139,3 +172,4 @@ python -m pytest
 - 键连判据的边界情况；
 - 三态机的系数变化；
 - 吸引势确实能把分子拉近。
+- 一维线搜索、分子放置、SynthesisPot 越过双势阱能垒、AttractivePot 拉到终态后撤掉偏置并弛豫。
