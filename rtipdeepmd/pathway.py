@@ -1,6 +1,7 @@
-"""RTIP pathway sampling for the synthesis of several molecules.
+"""RTIP pathway sampling: synthesis of several molecules, and attraction toward a known final state.
 
-Port of the upstream Rust RTIP-MD ``impl RtipPathSampling for SynthesisPot``
+Port of the upstream Rust RTIP-MD ``impl RtipPathSampling for SynthesisPot`` and
+``impl RtipPathSampling for AttractivePot``
 (``src/pes_exploration/pathway_sampling.rs``), ``min_1d`` / ``min_1d_real_bias``
 (``optimization.rs``) and ``synthesis`` (``synthesis.rs``).
 
@@ -24,7 +25,7 @@ import numpy as np
 from .constants import GOLDEN_RATIO1, GOLDEN_RATIO2
 from .md import evolution_target
 from .rtip import rti_dist, rti_pot, rti_pot_force
-from .system import System, rand_rot
+from .system import System, dist_mat, rand_rot
 
 
 class PES(t.Protocol):
@@ -128,20 +129,42 @@ _PLACEMENT = {
 }
 
 
-def place_molecules(s: System, mol_index: list[list[int]], dist: float, rng: np.random.Generator) -> System:
-    """Randomly rotate each molecule and put its centre at ``dist`` (Bohr) from the origin (Rust ``synthesis``)."""
+def place_molecules(
+    s: System,
+    mol_index: list[list[int]],
+    dist: float,
+    rng: np.random.Generator,
+    min_contact: float = 0.0,
+    max_tries: int = 1000,
+) -> System:
+    """Randomly rotate each molecule and put its centre at ``dist`` (Bohr) from the origin (Rust ``synthesis``).
+
+    ``min_contact`` (Bohr, default 0 as in Rust) redraws the rotations until no two atoms of
+    different molecules are closer than this.
+    """
     if len(mol_index) not in _PLACEMENT:
         raise ValueError("synthesis placement is implemented for 2, 3 or 4 molecules")
-    out = s.clone()
-    rots = [rand_rot(rng) for _ in mol_index]
-    for idx, rot, direction in zip(mol_index, rots, _PLACEMENT[len(mol_index)]):
-        c = s.coord[idx]
-        out.coord[idx] = (c - c.mean(axis=0)) @ rot + dist * np.asarray(direction)
-    return out
+    label = np.full(s.natom, -1)
+    for k, idx in enumerate(mol_index):
+        label[idx] = k
+    inter = label[:, None] != label[None, :]
+    for _ in range(max_tries):
+        out = s.clone()
+        rots = [rand_rot(rng) for _ in mol_index]
+        for idx, rot, direction in zip(mol_index, rots, _PLACEMENT[len(mol_index)]):
+            c = s.coord[idx]
+            out.coord[idx] = (c - c.mean(axis=0)) @ rot + dist * np.asarray(direction)
+        if min_contact <= 0.0 or np.min(np.where(inter, dist_mat(out.coord), np.inf)) >= min_contact:
+            return out
+    raise ValueError(f"no placement with all intermolecular distances >= {min_contact} Bohr in {max_tries} tries")
 
 
 @dataclass
 class SynthesisPot:
+    """``mol_index`` lists the atoms of each reacting molecule. As in Rust, these may be fragments
+    (e.g. the reactive site of a large molecule); all other atoms are environment that feels the
+    real PES only."""
+
     initial_state: System
     mol_index: list[list[int]]
     para: PathPara
@@ -168,8 +191,11 @@ def synthesis_path_sampling(pot: SynthesisPot, real_pes: PES) -> SamplingResult:
     out = Path(pot.output_path)
     out.mkdir(parents=True, exist_ok=True)
     s = pot.initial_state.clone()
-    if sorted(i for mol in pot.mol_index for i in mol) != list(range(s.natom)):
-        raise ValueError("mol_index must cover every atom exactly once")
+    frag = np.array([i for mol in pot.mol_index for i in mol])
+    if len(set(frag.tolist())) != len(frag) or frag.min() < 0 or frag.max() >= s.natom:
+        raise ValueError("mol_index must list distinct atoms of the system")
+    bounds = np.cumsum([0] + [len(mol) for mol in pot.mol_index])
+    local_index = [list(range(int(bounds[k]), int(bounds[k + 1]))) for k in range(len(pot.mol_index))]
 
     pot_max, pot_min, pot_initial = -np.inf, np.inf, 0.0
     add_rtip = True
@@ -185,13 +211,14 @@ def synthesis_path_sampling(pot: SynthesisPot, real_pes: PES) -> SamplingResult:
             s.pot = pot_real
             f_real = float(np.sqrt(np.sum(force_real * force_real)))
 
-            final_coord = evolution_target(s.coord, pot.mol_index)
-            sigma = rti_dist(final_coord, s.coord)
+            final_coord = evolution_target(s.coord[frag], local_index)
+            sigma = rti_dist(final_coord, s.coord[frag])
             a_min = -para.a0 * step if add_rtip else 0.0
+            force_rtip = np.zeros_like(s.coord)
             if add_rtip:
-                pot_rtip, force_rtip = rti_pot_force(final_coord, s.coord, a_min, sigma)
+                pot_rtip, force_rtip[frag] = rti_pot_force(final_coord, s.coord[frag], a_min, sigma)
             else:
-                pot_rtip, force_rtip = 0.0, np.zeros_like(s.coord)
+                pot_rtip = 0.0
             f_rtip = float(np.sqrt(np.sum(force_rtip * force_rtip)))
 
             if step % para.print_step == 0:
@@ -200,7 +227,7 @@ def synthesis_path_sampling(pot: SynthesisPot, real_pes: PES) -> SamplingResult:
             log.flush()
 
             def bias_energy(coord: np.ndarray) -> float:
-                return rti_pot(final_coord, coord, a_min, sigma) if add_rtip else 0.0
+                return rti_pot(final_coord, coord[frag], a_min, sigma) if add_rtip else 0.0
 
             try:
                 s.coord = s.coord + min_1d_real_bias(
@@ -225,6 +252,84 @@ def synthesis_path_sampling(pot: SynthesisPot, real_pes: PES) -> SamplingResult:
                 break
             if f_rtip > 1000.0:
                 status = "bias_force"
+                break
+        log.write(f"# END step={step} status={status} bias_removed_at={bias_removed_at}\n")
+    s.write_xyz(out / "final.xyz", True, step)
+    return SamplingResult(status, step, s, pot_initial, pot_max, pot_min, bias_removed_at)
+
+
+@dataclass
+class AttractivePot:
+    """Pull ``initial_state`` toward ``final_state`` (same atom order) with an attractive RTIP."""
+
+    initial_state: System
+    final_state: System
+    para: PathPara
+    output_path: str | Path
+
+
+def attractive_path_sampling(pot: AttractivePot, real_pes: PES) -> SamplingResult:
+    """Rust ``AttractivePot::rtip_path_sampling``.
+
+    The RTIP is centred at the final state with height -a0 * step and width equal to the current
+    RTI distance to it. It is removed once that distance is below 1 Bohr (or the RTIP force exceeds
+    1000); the structure is then relaxed on the real PES until f_real / sqrt(N) < ``f_epsilon``.
+    """
+    para = pot.para
+    out = Path(pot.output_path)
+    out.mkdir(parents=True, exist_ok=True)
+    s = pot.initial_state.clone()
+    final_coord = pot.final_state.coord
+    if final_coord.shape != s.coord.shape or pot.final_state.atom_type != s.atom_type:
+        raise ValueError("initial and final states must contain the same atoms in the same order")
+
+    pot_max, pot_min, pot_initial = -np.inf, np.inf, 0.0
+    add_rtip = True
+    bias_removed_at = None
+    status = "max_step"
+    step = 0
+    with open(out / "rtip.pdb", "w", encoding="utf-8") as pdb, open(out / "rtip.out", "w", encoding="utf-8") as log:
+        pdb.write("TITLE     PDB file created by RTIP\n")
+        pdb.write(s.pdb_frame(0))
+        log.write(HEADER)
+        for step in range(1, para.max_step + 1):
+            pot_real, force_real = real_pes.get_energy_force(s)
+            s.pot = pot_real
+            f_real = float(np.sqrt(np.sum(force_real * force_real)))
+            if step == 1:
+                pot_initial = pot_real
+            pot_max = max(pot_max, pot_real)
+            pot_min = min(pot_min, pot_real)
+
+            sigma = rti_dist(final_coord, s.coord)
+            a_min = -para.a0 * step if add_rtip else 0.0
+            if add_rtip:
+                pot_rtip, force_rtip = rti_pot_force(final_coord, s.coord, a_min, sigma)
+            else:
+                pot_rtip, force_rtip = 0.0, np.zeros_like(s.coord)
+            f_rtip = float(np.sqrt(np.sum(force_rtip * force_rtip)))
+
+            if step % para.print_step == 0:
+                pdb.write(s.pdb_frame(step))
+            log.write(f"{step:6d} {sigma:15.8f} {pot_real:15.8f} {pot_rtip:15.8f} {f_real:15.8f} {f_rtip:15.8f} {a_min:15.8f}\n")
+            log.flush()
+
+            def bias_energy(coord: np.ndarray) -> float:
+                return rti_pot(final_coord, coord, a_min, sigma) if add_rtip else 0.0
+
+            try:
+                s.coord = s.coord + min_1d_real_bias(
+                    real_pes, bias_energy, s, force_real + force_rtip, pot_real + pot_rtip, para.pot_epsilon * s.natom
+                )
+            except LineSearchError:
+                status = "line_search"
+                break
+
+            if add_rtip and (sigma < 1.0 or f_rtip > 1000.0):
+                add_rtip = False
+                bias_removed_at = step
+            if not add_rtip and f_real / np.sqrt(s.natom) < para.f_epsilon:
+                status = "product"
                 break
         log.write(f"# END step={step} status={status} bias_removed_at={bias_removed_at}\n")
     s.write_xyz(out / "final.xyz", True, step)

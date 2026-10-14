@@ -103,3 +103,44 @@ def test_cli_synthesis_dry_run(tmp_path):
     assert info["method"] == "synthesis" and info["para"]["max_step"] == 2000
     c1, c2 = s.coord[:4].mean(0), s.coord[4:].mean(0)
     assert np.linalg.norm(c2 - c1) == pytest.approx(10.0, abs=1e-6)   # two centres at -/+ 5 Bohr
+
+
+def test_fragment_rtip_only_acts_on_fragment_atoms(tmp_path):
+    from rtipdeepmd.cli import parse_fragments
+
+    assert parse_fragments(["1:2,4-5"], [[0, 1, 2, 3, 4], [5, 6]]) == [[1, 3, 4], [5, 6]]
+    # the third atom is an environment spectator far away: no RTIP force on it
+    s = System(coord=np.array([[-5.0, 0, 0], [5.0, 0, 0], [0.0, 30.0, 0.0]]), atom_type=["H", "H", "H"])
+
+    class Env(DoubleWell):
+        def get_energy_force(self, s):
+            e, f = DoubleWell.get_energy_force(self, System(coord=s.coord[:2], atom_type=["H", "H"]))
+            return e, np.vstack([f, np.zeros((1, 3))])
+
+    res = synthesis_path_sampling(SynthesisPot(s, [[0], [1]], PathPara(), tmp_path), Env(0.03))
+    assert res.status == "product"
+    np.testing.assert_allclose(res.final_state.coord[2], [0.0, 30.0, 0.0])
+
+
+def test_place_molecules_min_contact():
+    rng = np.random.default_rng(5)
+    a = np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
+    s = System(coord=np.concatenate([a, a]), atom_type=["C"] * 6)
+    out = place_molecules(s, [[0, 1, 2], [3, 4, 5]], 4.0, rng, min_contact=3.0)
+    assert dist_mat(out.coord)[:3, 3:].min() >= 3.0
+    with pytest.raises(ValueError):
+        place_molecules(s, [[0, 1, 2], [3, 4, 5]], 0.5, rng, min_contact=50.0, max_tries=20)
+
+
+def test_attractive_pulls_to_final_state_and_relaxes(tmp_path):
+    from rtipdeepmd.pathway import AttractivePot, attractive_path_sampling
+
+    start = System(coord=np.array([[-5.0, 0.0, 0.0], [5.0, 0.0, 0.0]]), atom_type=["H", "H"])
+    final = System(coord=np.array([[-0.7, 0.0, 0.0], [0.7, 0.0, 0.0]]), atom_type=["H", "H"])
+    res = attractive_path_sampling(AttractivePot(start, final, PathPara(), tmp_path), DoubleWell(0.03))
+    assert res.status == "product"
+    assert res.bias_removed_at is not None
+    assert np.linalg.norm(res.final_state.coord[1] - res.final_state.coord[0]) == pytest.approx(1.4, abs=0.02)
+    assert res.pot_max == pytest.approx(0.03, abs=0.005)
+    with pytest.raises(ValueError):
+        attractive_path_sampling(AttractivePot(start, System(coord=np.zeros((3, 3)), atom_type=["H"] * 3), PathPara(), tmp_path), DoubleWell(0.03))

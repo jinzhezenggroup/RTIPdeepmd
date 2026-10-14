@@ -9,10 +9,17 @@ import secrets
 
 import numpy as np
 
-from .constants import BOHR_TO_ANGSTROM, check_element
+from .constants import ANGSTROM_TO_BOHR, BOHR_TO_ANGSTROM, check_element
 from .md import EvolutionPot, evolution_nvt_md
 from .params import Para
-from .pathway import PathPara, SynthesisPot, place_molecules, synthesis_path_sampling
+from .pathway import (
+    AttractivePot,
+    PathPara,
+    SynthesisPot,
+    attractive_path_sampling,
+    place_molecules,
+    synthesis_path_sampling,
+)
 from .system import System
 
 # Same molecules and multiplicities as the Rust lib.rs (formose reaction, Ca(OH)2 + CH2O + H2O).
@@ -48,10 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m rtipdeepmd", description="RTIP evolution MD / pathway sampling with a DeepMD PES.")
     p.add_argument(
         "--method",
-        choices=["evolution", "synthesis"],
+        choices=["evolution", "synthesis", "attractive"],
         default="evolution",
         help="evolution: RTIP-driven NVT MD of a box of molecules (Rust EvolutionPot); "
-        "synthesis: RTIP pathway sampling of 2-4 molecules (Rust SynthesisPot).",
+        "synthesis: RTIP pathway sampling of 2-4 molecules (Rust SynthesisPot); "
+        "attractive: RTIP pathway sampling toward --final (Rust AttractivePot).",
     )
     p.add_argument("--model", help="DeepMD model file (.pt/.pth/.pb). Required unless --dry-run.")
     p.add_argument("--head", default="OMol25", help="Head of a multi-task DeepMD model (default: OMol25, molecular DFT).")
@@ -72,11 +80,25 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: the Rust formose list H-O,C-O,H-Ca,C-Ca,O-Ca,Ca-Ca).",
     )
     p.add_argument("--init", type=Path, default=None, help="Start from this XYZ instead of building a box.")
+    p.add_argument("--final", type=Path, default=None, help="attractive: final-state XYZ, same atom order as the initial state.")
     p.add_argument("--min-dist", type=float, default=3.5, help="Minimum intermolecular distance when building the box (Angstrom).")
     p.add_argument("--seed", type=int, default=None, help="Random seed for box construction (default: random, recorded).")
     p.add_argument("--pbc", action="store_true", help="Evaluate DeepMD with the box as periodic cell (Rust/CP2K: non-periodic).")
     p.add_argument("--stop-temp", type=float, default=None, help="Abort when the temperature exceeds this value (K).")
     p.add_argument("--dry-run", action="store_true", help="Only build and write the initial structure.")
+    p.add_argument(
+        "--fragment",
+        action="append",
+        metavar="MOL:ATOMS",
+        help="synthesis: only these atoms of molecule MOL (1-based, e.g. 1:6,17-18) feel the RTIP; "
+        "the rest of that molecule is environment. Default: whole molecules.",
+    )
+    p.add_argument(
+        "--min-contact",
+        type=float,
+        default=0.0,
+        help="synthesis: redraw placements until intermolecular distances >= this (Angstrom; Rust: no check).",
+    )
     p.add_argument(
         "--synthesis-dist",
         type=float,
@@ -132,21 +154,39 @@ def parse_ignored_pairs(text: str | None) -> list[tuple[str, str]] | None:
     return pairs
 
 
-def build_synthesis_state(recipe: list[tuple[str, int]], dist: float, rng: np.random.Generator) -> tuple[System, list[list[int]]]:
+def parse_fragments(items: list[str] | None, mol_index: list[list[int]]) -> list[list[int]]:
+    """Reacting atoms per molecule from "MOL:ATOMS" items (1-based, ranges allowed)."""
+    frags = [list(m) for m in mol_index]
+    for item in items or []:
+        mol, _, atoms = item.partition(":")
+        k = int(mol) - 1
+        picked = []
+        for part in atoms.split(","):
+            lo, _, hi = part.partition("-")
+            picked.extend(range(int(lo), int(hi or lo) + 1))
+        if not 0 <= k < len(mol_index) or not all(1 <= a <= len(mol_index[k]) for a in picked):
+            raise SystemExit(f"invalid --fragment {item!r}")
+        frags[k] = [mol_index[k][a - 1] for a in picked]
+    return frags
+
+
+def build_synthesis_state(
+    recipe: list[tuple[str, int]], dist: float, rng: np.random.Generator, min_contact: float = 0.0
+) -> tuple[System, list[list[int]]]:
     if not 2 <= len(recipe) <= 4 or any(n != 1 for _, n in recipe):
         raise SystemExit("--method synthesis needs 2 to 4 --molecule files, each with count 1")
     mols = [System.read_xyz(Path(name)) for name, _ in recipe]
     s = System(coord=np.concatenate([m.coord for m in mols]), atom_type=[e for m in mols for e in m.atom_type])
     bounds = np.cumsum([0] + [m.natom for m in mols])
     mol_index = [list(range(int(bounds[k]), int(bounds[k + 1]))) for k in range(len(mols))]
-    return place_molecules(s, mol_index, dist, rng), mol_index
+    return place_molecules(s, mol_index, dist, rng, min_contact), mol_index
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    if args.method == "synthesis":
+    if args.method in ("synthesis", "attractive"):
         return main_synthesis(args, out)
 
     para = Para(
@@ -215,8 +255,10 @@ def report_model(args: argparse.Namespace, pes, s: System) -> None:
 
 
 def main_synthesis(args: argparse.Namespace, out: Path) -> int:
-    if not args.molecule:
-        raise SystemExit("--method synthesis needs --molecule files")
+    if args.method == "attractive" and args.final is None:
+        raise SystemExit("--method attractive needs --final")
+    if not args.molecule and args.init is None:
+        raise SystemExit(f"--method {args.method} needs --molecule files or --init")
     path_para = PathPara(
         a0=args.a0,
         pot_climb=args.pot_climb,
@@ -227,11 +269,20 @@ def main_synthesis(args: argparse.Namespace, out: Path) -> int:
         print_step=args.print_step if args.print_step is not None else 1,
     )
     seed = args.seed if args.seed is not None else secrets.randbits(32)
-    s, mol_index = build_synthesis_state(parse_molecules(args.molecule), args.synthesis_dist, np.random.default_rng(seed))
+    if args.init is not None:
+        s = System.read_xyz(args.init)
+        mol_index = [list(range(s.natom))]
+    else:
+        s, mol_index = build_synthesis_state(
+            parse_molecules(args.molecule), args.synthesis_dist, np.random.default_rng(seed), args.min_contact * ANGSTROM_TO_BOHR
+        )
+    mol_index = parse_fragments(args.fragment, mol_index)
     s.write_xyz(out / "initial.xyz", True, 0)
     print(f"Initial structure: {s.natom} atoms in {len(mol_index)} molecules, seed {seed} -> {out / 'initial.xyz'}", flush=True)
     run_info = {
-        "method": "synthesis",
+        "method": args.method,
+        "init": None if args.init is None else str(args.init),
+        "final": None if args.final is None else str(args.final),
         "model": args.model,
         "head": args.head,
         "charge": args.charge,
@@ -239,6 +290,8 @@ def main_synthesis(args: argparse.Namespace, out: Path) -> int:
         "seed": seed,
         "molecule": args.molecule,
         "synthesis_dist_bohr": args.synthesis_dist,
+        "fragment": args.fragment,
+        "min_contact_angstrom": args.min_contact,
         "para": path_para.to_dict(),
     }
     (out / "run.json").write_text(json.dumps(run_info, indent=2) + "\n", encoding="utf-8")
@@ -247,7 +300,10 @@ def main_synthesis(args: argparse.Namespace, out: Path) -> int:
 
     pes = load_pes(args)
     report_model(args, pes, s)
-    res = synthesis_path_sampling(SynthesisPot(s, mol_index, path_para, out), pes)
+    if args.method == "attractive":
+        res = attractive_path_sampling(AttractivePot(s, System.read_xyz(args.final), path_para, out), pes)
+    else:
+        res = synthesis_path_sampling(SynthesisPot(s, mol_index, path_para, out), pes)
     run_info["result"] = {
         "status": res.status,
         "steps": res.steps,
