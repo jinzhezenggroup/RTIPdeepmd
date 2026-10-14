@@ -3,8 +3,9 @@
 Atom roles are detected from the first molecule (the methyleneborane-N2 complex 1-R):
 B, N_alpha (the N2 atom bonded to B) and N_beta (terminal N). The second molecule is the small
 molecule (CO2, CS2, H2CO, MeCN, MeCH=NMe). A frame counts as coupled when N_beta binds the
-small molecule's carbon (< 1.70 A) and B binds one of its heteroatoms (< 1.80 A), i.e. the
-B-N=N-C-X-B ring of the paper's products.
+small molecule's carbon and B binds one of its heteroatoms (both shorter than 1.2 times the sum
+of the covalent radii, the Rust contact criterion), i.e. the B-N=N-C-X-B ring of the paper's
+products.
 
 With --relax, the last frame of each coupled run is relaxed with DeepMD and its bond lengths
 (the columns of the paper's Table 1) and the reaction energy relative to the DeepMD-relaxed
@@ -22,10 +23,14 @@ from pathlib import Path
 import numpy as np
 
 from rtipdeepmd.cli import parse_molecules
+from rtipdeepmd.constants import BOHR_TO_ANGSTROM, atomic_radius
 
 HARTREE_TO_KCAL = 627.509474
-COUPLED_NC = 1.70
-COUPLED_BX = 1.80
+COUPLED = 1.2  # bonded when d < COUPLED * (r_i + r_j)
+
+
+def bond_cutoff(a: str, b: str) -> float:
+    return COUPLED * (atomic_radius(a) + atomic_radius(b)) * BOHR_TO_ANGSTROM
 
 
 def read_pdb_frames(path: Path) -> tuple[list[str], list[int], np.ndarray]:
@@ -112,11 +117,11 @@ def analyze_run(run: Path, pes=None) -> dict:
     types, steps, frames = read_pdb_frames(run / "rtip.pdb")
     r = roles(types, frames[0], n1)
     metrics = [frame_metrics(c, r) for c in frames]
-    coupled = [m["N_beta-C"] < COUPLED_NC and m["B-X"] < COUPLED_BX for m in metrics]
+    coupled = [m["N_beta-C"] < bond_cutoff("N", "C") and m["B-X"] < bond_cutoff("B", types[m["X"]]) for m in metrics]
     n2_lost = [m["B-N_alpha"] > 2.2 or m["N-N"] > 1.6 for m in metrics]
     log = [l.split() for l in (run / "rtip.out").read_text().splitlines()[1:] if not l.startswith("#")]
     out = {"run": str(run), "method": method, "seed": info["seed"], "steps": int(steps[-1])}
-    if method == "synthesis":
+    if method in ("synthesis", "attractive"):
         pot_real = np.array([float(x[2]) for x in log])
         out["status"] = info.get("result", {}).get("status")
         out["bias_removed_at"] = info.get("result", {}).get("bias_removed_at")

@@ -17,7 +17,10 @@ from pathlib import Path
 
 import numpy as np
 from ase import Atoms
-from ase.dimer import DimerControl, MinModeAtoms, MinModeTranslate
+try:  # ASE >= 3.23
+    from ase.mep.dimer import DimerControl, MinModeAtoms, MinModeTranslate
+except ImportError:
+    from ase.dimer import DimerControl, MinModeAtoms, MinModeTranslate
 from ase.optimize import BFGS
 
 from rtipdeepmd.ase_calculator import DeepmdCalculator
@@ -63,6 +66,65 @@ def frequencies(atoms: Atoms, hess: np.ndarray) -> np.ndarray:
     return np.sign(w) * np.sqrt(np.abs(w)) * AMU_EV_A2_TO_CM1
 
 
+def refine_ts(atoms: Atoms, fmax: float) -> tuple[bool, float, np.ndarray]:
+    """Dimer search from ``atoms`` along the lowest Hessian mode; returns (converged, E, frequencies)."""
+    _, v = np.linalg.eigh(hessian(atoms))
+    control = DimerControl(initial_eigenmode_method="displacement", displacement_method="vector", logfile=None)
+    d_atoms = MinModeAtoms(atoms, control)
+    d_atoms.displace(displacement_vector=0.01 * v[:, 0].reshape(-1, 3))
+    converged = bool(MinModeTranslate(d_atoms, trajectory=None, logfile=None).run(fmax=fmax, steps=1000))
+    atoms.positions = d_atoms.get_positions()
+    return converged, atoms.get_potential_energy(), frequencies(atoms, hessian(atoms))
+
+
+def read_path(run: Path) -> tuple[list[Atoms], np.ndarray]:
+    frames, cur, types = [], [], []
+    for line in (run / "rtip.pdb").read_text().splitlines():
+        if line.startswith("REMARK"):
+            cur, types = [], []
+        elif line.startswith("ATOM"):
+            types.append(line[12:16].strip())
+            cur.append([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+        elif line.startswith("END"):
+            frames.append(Atoms(types, positions=cur))
+    log = [l.split() for l in (run / "rtip.out").read_text().splitlines()[1:] if not l.startswith("#")]
+    return frames, np.array([float(x[2]) for x in log])
+
+
+def ts_from_paths(runs: list[Path], calc, fmax: float) -> list[dict]:
+    """Refine the highest-energy point of each RTIP path into a DeepMD transition state."""
+    results, e_sep = [], {}
+    for run in runs:
+        rdir = HERE / "reactions" / run.parent.name
+        if rdir.name not in e_sep:
+            e = 0.0
+            for name in ("1.xyz", "2.xyz"):
+                atoms = read_xyz(rdir / name)
+                atoms.calc = calc
+                e += relax(atoms, fmax)
+            e_sep[rdir.name] = e
+        frames, pot = read_path(run)
+        k = int(np.argmax(pot)) + 1          # frame 0 is the initial structure (step 0)
+        atoms = frames[min(k, len(frames) - 1)]
+        atoms.calc = calc
+        converged, e_ts, freq = refine_ts(atoms, fmax)
+        row = {
+            "run": str(run),
+            "path_max_kcal": (pot.max() * 27.211386 - e_sep[rdir.name]) * EV_TO_KCAL,
+            "barrier_dp_kcal": (e_ts - e_sep[rdir.name]) * EV_TO_KCAL,
+            "ts_converged": converged,
+            "n_imaginary": int(np.sum(freq < -50.0)),
+            "imag_freq_cm1": float(freq[0]),
+        }
+        ts_ref = rdir / "ts_ordered.xyz"
+        if ts_ref.exists():
+            row["ts_rmsd_to_si_A"] = kabsch_rmsd(atoms.positions, read_xyz(ts_ref).positions)
+        results.append(row)
+        print(json.dumps(row), flush=True)
+        atoms.write(run / "ts_dp.xyz")
+    return results
+
+
 def relax(atoms: Atoms, fmax: float) -> float:
     BFGS(atoms, logfile=None).run(fmax=fmax, steps=2000)
     return atoms.get_potential_energy()
@@ -74,10 +136,15 @@ def main() -> None:
     ap.add_argument("--head", default="OMol25")
     ap.add_argument("--fmax", type=float, default=0.01)
     ap.add_argument("--only", default=None, help="Only reactions whose name contains this text.")
+    ap.add_argument("--from-path", nargs="+", type=Path, default=None,
+                    help="RTIP run directories (runs/<method>/<reaction>/s*): refine the path maximum instead of the SI TS.")
     ap.add_argument("--out", default="ts_barriers.json")
     args = ap.parse_args()
 
     calc = DeepmdCalculator(DeepmdPES.load(args.model, head=args.head))
+    if args.from_path:
+        Path(args.out).write_text(json.dumps(ts_from_paths(args.from_path, calc, args.fmax), indent=1) + "\n", encoding="utf-8")
+        return
     paths = {p.stem.split("_", 1)[1]: p for p in (HERE / "structures").rglob("*.xyz")}
     with open(HERE / "manifests" / "manifest.csv", encoding="utf-8") as f:
         e_si = {r["name"]: float(r["energy_hartree"]) for r in csv.DictReader(f)}
@@ -101,15 +168,7 @@ def main() -> None:
         atoms = read_xyz(paths[ts])
         si_pos = atoms.positions.copy()
         atoms.calc = calc
-        hess0 = hessian(atoms)
-        w, v = np.linalg.eigh(hess0)
-        control = DimerControl(initial_eigenmode_method="displacement", displacement_method="vector", logfile=None)
-        d_atoms = MinModeAtoms(atoms, control)
-        d_atoms.displace(displacement_vector=0.01 * v[:, 0].reshape(-1, 3))
-        converged = bool(MinModeTranslate(d_atoms, trajectory=None, logfile=None).run(fmax=args.fmax, steps=1000))
-        atoms.positions = d_atoms.get_positions()
-        e_ts = atoms.get_potential_energy()
-        freq = frequencies(atoms, hessian(atoms))
+        converged, e_ts, freq = refine_ts(atoms, args.fmax)
         e_ref = minimum(r1) + minimum(r2)
         row = {
             "reaction": r["reaction"],

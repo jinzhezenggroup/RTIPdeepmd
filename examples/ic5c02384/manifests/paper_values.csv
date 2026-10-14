@@ -1,0 +1,12 @@
+reaction,dG_paper,dG_ts_paper,dE_ts_paper_tz,note
+1-CN + CO2 -> 1-CN-CO2.P,2.0,,,Table 1
+1-H + CO2 -> 1-H-CO2.P,0.3,,,Table 1
+1-Me + CO2 -> 1-Me-CO2.P,-6.5,,16.2,Table 1; Table 3
+1-Ph + CO2 -> 1-Ph-CO2.P,-3.1,,18.6,Table 1; Table 3
+1-PMe2 + CO2 -> 1-PMe2-CO2.P,-6.3,,17.6,Table 1; Table 3
+1-SiMe3 + CO2 -> 1-SiMe3-CO2.P,-1.3,,21.8,Table 1; Table 3
+1-tBu + CO2 -> 1-tBu-CO2.P,-10.1,25.1,13.1,Table 1; Table 3/4; barrier in the text
+1-tBu + CS2 -> 1-tBu-CS2.P,,19.2,8.1,Table 4; the text gives 19.2 for 'sulfur dioxide' but Table 4 and the SI have CS2
+1-tBu + H2CO -> 1-tBu-H2CO.P,,11.9,-1.8,Table 4; barrier in the text
+1-tBu + MeCN -> 1-tBu-MeCN.P,,25.7,13.3,Table 4; barrier in the text
+1-tBu + MeCH=NMe -> 1-tBu-MeCH=NMe.P,,27.5,12.1,Table 4; barrier in the text
